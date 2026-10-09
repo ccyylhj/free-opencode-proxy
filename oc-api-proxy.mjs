@@ -54,12 +54,40 @@ const REQUEST_TIMEOUT = Number(process.env.OC_TIMEOUT || 600) * 1000;
 
 function findBinary() {
   const candidates = [
+    // Windows first: ~/.opencode/bin/opencode.exe
+    path.join(os.homedir(), ".opencode", "bin", "opencode.exe"),
     path.join(os.homedir(), ".opencode", "bin", "opencode"),
+    // Unix
     "/usr/local/bin/opencode",
     "/usr/bin/opencode",
   ];
-  for (const c of candidates) if (fs.existsSync(c)) return c;
-  return "opencode";
+  for (const c of candidates) {
+    try { if (c && fs.existsSync(c)) return c; } catch {}
+  }
+  // bare name: resolved via PATH (opencode / opencode.exe / opencode.cmd)
+  return process.platform === "win32" ? "opencode.exe" : "opencode";
+}
+
+function ifExists(p) {
+  try { return !!p && fs.existsSync(p); } catch { return false; }
+}
+
+// 解析 npm 的 .cmd 跳板, 挖出背后的真 .exe.
+// 例: "%dp0%\node_modules\@opencode\cli\bin\opencode.exe" %*  →  C:\...\npm\node_modules\...exe
+function unwrapCmdShim(cmdFile) {
+  try {
+    const text = fs.readFileSync(cmdFile, "utf8");
+    const m = text.match(/"([^"]*opencode\.exe)"/i) || text.match(/([^\s"]*opencode\.exe)/i);
+    if (!m) return null;
+    let target = m[1];
+    target = target.replace(/%dp0%\\?/gi, path.dirname(cmdFile) + path.sep);
+    target = target.replace(/^"|"$/g, "");
+    if (ifExists(target)) return target;
+    // 有时 .cmd 指向的 exe 带版本号等, 做一次 basename 兜底
+    const base = path.join(path.dirname(cmdFile), path.basename(target));
+    if (ifExists(base)) return base;
+    return null;
+  } catch { return null; }
 }
 
 // ── API keys (same scheme as server.mjs) ────────────────────────────
@@ -131,60 +159,182 @@ async function startBackend() {
       : null;
     return;
   }
-  if (OC_BIN === "opencode" && !fs.existsSync("/usr/bin/opencode")) {
+  let bin = OC_BIN;
+  const isBareName = !bin.includes(path.sep) && !bin.includes("/");
+  if (isBareName) {
+    // bare command: resolve via PATH to an absolute path (no shell:true,
+    // avoids DEP0190 + arg-concat injection). Windows prefers .exe.
     try {
       const { execSync } = await import("child_process");
-      execSync("command -v opencode", { stdio: "ignore" });
+      if (process.platform === "win32") {
+        const out = execSync("where opencode", {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        });
+        const lines = out
+          .split(/\r?\n/)
+          .map((s) => s.trim().replace(/^"|"$/g, ""))
+          .filter(Boolean);
+        // 1) PATH 上的真 .exe 最优先
+        bin = lines.find((l) => l.toLowerCase().endsWith(".exe") && ifExists(l)) || null;
+        // 2) npm 的 opencode.cmd 只是跳板: @"%dp0%\node_modules\@opencode\cli\bin\opencode.exe" %*
+        //    直接挖出背后的真 .exe, 避免走 cmd.exe.
+        if (!bin) {
+          for (const cmdFile of lines.filter((l) => /\.cmd$/i.test(l))) {
+            const real = unwrapCmdShim(cmdFile);
+            if (real) { bin = real; break; }
+          }
+        }
+        // 3) 兜底: .cmd/.bat (稍后经 cmd.exe /c 单字符串启动)
+        bin = bin ||
+          lines.find((l) => /\.cmd$/i.test(l)) ||
+          lines.find((l) => /\.bat$/i.test(l)) ||
+          lines.find((l) => /\.[a-z0-9]+$/i.test(l)) ||
+          null;
+        if (!bin) {
+          throw new Error(
+            `where opencode only returned extensionless shims (${lines.join("; ")}) — set OC_BIN to the full opencode.cmd path`
+          );
+        }
+      } else {
+        if (!fs.existsSync("/usr/bin/opencode") && !fs.existsSync("/usr/local/bin/opencode")) {
+          execSync("command -v opencode", { stdio: "ignore" });
+        }
+      }
     } catch {
       throw new Error("opencode binary not found — set OC_BIN or install opencode");
     }
+  } else if (!fs.existsSync(bin)) {
+    throw new Error(`opencode binary not found at ${bin} — set OC_BIN correctly`);
   }
   fs.mkdirSync(OC_WORKDIR, { recursive: true });
   const password = "oc-" + crypto.randomBytes(12).toString("hex");
-  const child = spawn(OC_BIN, ["serve", "--port", "0", "--hostname", "127.0.0.1"], {
+  // .cmd/.bat shims can't be spawned directly — route via cmd.exe with
+  // the whole command as ONE /c string (no shell:true, so no DEP0190).
+  const isCmdShim = /\.cmd$|\.bat$/i.test(bin);
+  const spawnFile = isCmdShim ? (process.env.ComSpec || "cmd.exe") : bin;
+  const spawnArgs = isCmdShim
+    ? ["/d", "/s", "/c", `""${bin}" serve --port 0 --hostname 127.0.0.1"`]
+    : ["serve", "--port", "0", "--hostname", "127.0.0.1"];
+  console.log(`[OC] spawning: ${spawnFile} ${spawnArgs.join(" ")} (cwd=${OC_WORKDIR})`);
+  const child = spawn(spawnFile, spawnArgs, {
     env: { ...process.env, OPENCODE_SERVER_PASSWORD: password },
     cwd: OC_WORKDIR,
     stdio: ["ignore", "pipe", "pipe"],
+    windowsVerbatimArguments: isCmdShim ? true : undefined,
   });
   child.on("exit", (code) => console.log("[OC] opencode serve exited with code", code));
   process.on("exit", () => { try { child.kill("SIGKILL"); } catch {} });
 
   const port = await new Promise((resolve, reject) => {
     let buf = "";
-    const timer = setTimeout(() => reject(new Error("opencode serve did not start within 45s")), 45000);
+    const timer = setTimeout(() => {
+      console.error("[OC] serve start timeout, captured output:\n" + buf.slice(-4000));
+      reject(new Error("opencode serve did not start within 45s"));
+    }, 45000);
     const onData = (d) => {
       buf += d.toString();
+      if (buf.length > 20000) buf = buf.slice(-20000);
       const m = buf.match(/listening on https?:\/\/[^:]+:(\d+)/);
       if (m) { clearTimeout(timer); resolve(m[1]); }
     };
     child.stdout.on("data", onData);
     child.stderr.on("data", onData);
-    child.on("exit", (c) => { clearTimeout(timer); reject(new Error(`opencode serve exited early (code ${c})`)); });
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      reject(new Error(`failed to spawn opencode (${bin} via ${spawnFile}): ${e.message}`));
+    });
+    child.on("exit", (c) => {
+      clearTimeout(timer);
+      console.error("[OC] serve early-exit output:\n" + (buf || "(no output)").slice(-4000));
+      reject(new Error(`opencode serve exited early (code ${c}). Output tail above; try running manually: "${bin}" serve --port 0 --hostname 127.0.0.1`));
+    });
   });
   ocBase = `http://127.0.0.1:${port}`;
   ocAuth = "Basic " + Buffer.from(`opencode:${password}`).toString("base64");
   console.log(`[OC] opencode serve backend on ${ocBase}`);
 
+  // v2: plugins settle a few seconds after listen — /api/model is []
+  // at first, then fills in. Poll until non-empty.
   for (let i = 0; i < 60; i++) {
     try {
-      const r = await ocReq("GET", "/provider");
-      if (r.status === 200) return;
+      const r = await ocReq("GET", "/api/model");
+      if (r.status === 200 && Array.isArray(r.json?.data) && r.json.data.length > 0) return;
     } catch {}
     await new Promise((r) => setTimeout(r, 500));
   }
   throw new Error("opencode serve did not become healthy");
 }
 
-// ── models ──────────────────────────────────────────────────────────
+// ── models (v2: GET /api/model → { data: [{ id, modelID, providerID, cost }] }) ──
+// FREE_ONLY=1 (default): only serve models whose cost tiers are all zero.
+// ALLOWED_MODELS="a,b": explicit allowlist, overrides FREE_ONLY.
+// FREE_ONLY=0: serve everything upstream offers (you pay).
+const FREE_ONLY = !/^(0|false|no)$/i.test(process.env.FREE_ONLY ?? "1");
+const ALLOWED_MODELS = (process.env.ALLOWED_MODELS || "").split(",").map((s) => s.trim()).filter(Boolean);
+
+function isFreeModel(m) {
+  const cost = m?.cost;
+  return (
+    Array.isArray(cost) &&
+    cost.length > 0 &&
+    cost.every((c) => Number(c?.input) === 0 && Number(c?.output) === 0)
+  );
+}
+
 let modelCache = null;
+let modelVariants = {}; // id -> [variantId]
+let modelFree = {};     // id -> bool (all upstream opencode models)
+function isBlockedPaid(modelId) {
+  return modelId in modelFree && !modelFree[modelId] && !modelCache.includes(modelId);
+}
 async function getModels() {
   if (modelCache) return modelCache;
-  const r = await ocReq("GET", "/provider");
-  if (r.status !== 200 || !r.json?.all) throw new Error("failed to list opencode providers");
-  const oc = r.json.all.find((p) => p.id === "opencode");
-  modelCache = oc ? Object.keys(oc.models || {}) : [];
-  if (!modelCache.length) throw new Error("no opencode models found");
-  return modelCache;
+  // allow up to ~30s for plugin settlement on first call
+  for (let i = 0; i < 60; i++) {
+    const r = await ocReq("GET", "/api/model");
+    if (r.status !== 200) throw new Error("failed to list opencode models");
+    const data = Array.isArray(r.json?.data) ? r.json.data : [];
+    const all = data.filter((m) => m?.providerID === "opencode");
+    if (all.length) {
+      modelFree = {};
+      modelVariants = {};
+      for (const m of all) {
+        const id = m.id || m.modelID;
+        if (!id) continue;
+        modelFree[id] = isFreeModel(m);
+        if (Array.isArray(m.variants)) {
+          modelVariants[id] = m.variants.map((v) => v?.id).filter(Boolean);
+        }
+      }
+      const ids = Object.keys(modelFree);
+      modelCache = [
+        ...new Set(
+          ALLOWED_MODELS.length
+            ? ids.filter((id) => ALLOWED_MODELS.includes(id))
+            : FREE_ONLY
+              ? ids.filter((id) => modelFree[id])
+              : ids
+        ),
+      ];
+      if (!modelCache.length) throw new Error("no models left after FREE_ONLY/ALLOWED_MODELS filtering");
+      return modelCache;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error("no opencode models found");
+}
+
+// [xxx] 只是 CLI 的显示后缀(如 [1M] 指上下文, 并非 variant id).
+// 只有出现在 /api/model variants 里的才往上游传, 否则用默认变体.
+function effectiveVariant(modelId, v) {
+  if (!v) return undefined;
+  const allowed = modelVariants[modelId];
+  if (allowed && !allowed.includes(v)) {
+    console.log(`[OC] unknown variant "${v}" for ${modelId}, using default variant`);
+    return undefined;
+  }
+  return v;
 }
 
 // ── translation: chat formats → opencode prompt ─────────────────────
@@ -232,38 +382,136 @@ function sessionEntry(key) {
   return sessions.get(key);
 }
 
+// opencode CLI 的模型写法: [variant] 后缀表示变体(如 xxx[1M]),
+// [opencode/] 前缀是跨客户端兼容写法. v2 Model.Ref = { id, providerID, variant? }
+function parseModel(raw) {
+  let s = String(raw || "").replace(/^opencode\//, "");
+  let variant;
+  const m = s.match(/^(.+?)\[(.+?)\]$/);
+  if (m) { s = m[1]; variant = m[2]; }
+  return { id: s, variant };
+}
+
+function modelRef(modelId, modelVariant) {
+  return {
+    id: modelId,
+    providerID: "opencode",
+    ...(modelVariant ? { variant: modelVariant } : {}),
+  };
+}
+
 function upstreamError(r) {
   const msg =
     r.json?.data?.message ||
     r.json?.error?.message ||
     r.json?.message ||
+    (typeof r.raw === "string" && r.raw.slice(0, 300)) ||
     `opencode server returned ${r.status}`;
   const err = new Error(msg);
-  err.status = r.status === 429 ? 429 : r.status === 400 ? 400 : r.status === 401 ? 401 : 502;
+  err.status = [400, 401, 402, 429].includes(r.status) ? r.status : 502;
   return err;
 }
 
-async function ask({ key, system, modelId, transcript, lastUserText, onSession }) {
-  const model = { modelID: modelId, providerID: "opencode" };
+function assistantError(aErr) {
+  const msg =
+    aErr?.message ||
+    aErr?.data?.message ||
+    (typeof aErr === "string" ? aErr : "opencode run failed");
+  const status = aErr?.status;
+  const err = new Error(msg);
+  // provider.quota (402 Insufficient funds) / rate limits pass through,
+  // everything else becomes a 502 upstream error
+  err.status = [400, 401, 402, 429].includes(status) ? status : 502;
+  return err;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function ensureModel(sid, modelId, modelVariant) {
+  const r = await ocReq("POST", `/api/session/${sid}/model`, {
+    model: modelRef(modelId, effectiveVariant(modelId, modelVariant)),
+  });
+  if (r.status !== 200 && r.status !== 204) throw upstreamError(r);
+}
+
+// v2 prompt is async: POST /prompt enqueues, the agent runs in background.
+// Poll message list until the assistant turn completes (or execution fails
+// via SSE — watch.error — or a failed assistant message).
+async function promptAndWait(sid, text, watch) {
+  const posted = await ocReq("POST", `/api/session/${sid}/prompt`, { text });
+  if (posted.status !== 200) throw upstreamError(posted);
+  const deadline = Date.now() + REQUEST_TIMEOUT;
+  let lastSeen = 0;
+  while (Date.now() < deadline) {
+    if (watch?.error) throw watch.error;
+    const m = await ocReq("GET", `/api/session/${sid}/message?order=asc&limit=100`);
+    if (m.status !== 200) throw upstreamError(m);
+    const datas = Array.isArray(m.json?.data) ? m.json.data : [];
+    // stream progress into the SSE sink best-effort (poll-based fallback
+    // for shapes the /api/event tap doesn't recognise)
+    if (watch?.sink && !watch.sink.opened && datas.length !== lastSeen) {
+      lastSeen = datas.length;
+    }
+    const assistants = datas.filter((d) => d?.type === "assistant");
+    const lastA = assistants[assistants.length - 1];
+    if (lastA) {
+      if (lastA.error) throw assistantError(lastA.error);
+      if (lastA.finish === "error") {
+        throw assistantError({ message: "assistant run failed (finish=error)", status: 502 });
+      }
+      if (lastA.time?.completed) return { status: 200, json: lastA };
+    }
+    if (watch?.done) {
+      // execution finished but no completed assistant — surface what we have
+      if (lastA) return { status: 200, json: lastA };
+      throw new Error("opencode run finished without an assistant message");
+    }
+    await sleep(1500);
+  }
+  throw new Error("opencode request timed out");
+}
+
+function buildText({ system, transcript, lastUserText }) {
+  const body = transcript || lastUserText;
+  // v2 prompt has no `system` field — fold it into the text
+  return system ? `[System instructions]\n${system}\n\n${body}` : body;
+}
+
+// Preset the session title so the server skips its async title generation
+// (agent=title, small=true), which would otherwise bill one extra call on
+// Zen's rotating small model (gpt-6-luna, gpt-5.4-nano, ...) per session.
+function buildTitle(lastUserText) {
+  const t = String(lastUserText || "").replace(/\s+/g, " ").trim().slice(0, 60);
+  return t || "proxy session";
+}
+
+async function deleteSession(sid) {
+  try {
+    await ocReq("DELETE", `/api/session/${sid}`);
+  } catch (e) {
+    console.log(`[OC] temp session ${sid} not deleted:`, e.message);
+  }
+}
+
+async function ask({ key, system, modelId, modelVariant, transcript, lastUserText, onSession, watch }) {
+  const text = buildText({ system, transcript, lastUserText });
+  if (!text) throw Object.assign(new Error("No user message in request"), { status: 400 });
+  const variant = effectiveVariant(modelId, modelVariant);
+  const modelKey = modelId + (variant ? `[${variant}]` : "");
   if (!key) {
-    // stateless: fresh session, replay the whole transcript for context.
-    // the session exists only to serve this one request, so it is deleted as
-    // soon as the reply is in hand — only ever the id created in this call,
-    // keyed sessions and pre-existing ones are never touched.
-    const created = await ocReq("POST", "/session", {});
+    // stateless: fresh session per request, deleted right after the reply.
+    const created = await ocReq("POST", "/api/session", {
+      model: modelRef(modelId, variant),
+      title: buildTitle(lastUserText),
+    });
     if (created.status !== 200) throw upstreamError(created);
-    const sid = created.json.id;
+    const sid = created.json?.data?.id;
+    if (!sid) throw new Error("opencode did not return a session id");
     onSession?.(sid);
     try {
-      return await ocReq("POST", `/session/${sid}/message`, {
-        ...(system ? { system } : {}),
-        model,
-        parts: [{ type: "text", text: transcript || lastUserText }],
-      });
+      return await promptAndWait(sid, text, watch);
     } finally {
-      ocReq("DELETE", `/session/${sid}`).catch((e) =>
-        console.log(`[OC] temp session ${sid} not deleted:`, e.message)
-      );
+      deleteSession(sid);
     }
   }
   // stateful: pin one opencode session per key; first turn replays the
@@ -271,39 +519,60 @@ async function ask({ key, system, modelId, transcript, lastUserText, onSession }
   const entry = sessionEntry(key);
   const run = entry.chain.then(async () => {
     if (!entry.sessionID) {
-      const created = await ocReq("POST", "/session", {});
+      const created = await ocReq("POST", "/api/session", {
+        model: modelRef(modelId, variant),
+        title: buildTitle(lastUserText),
+      });
       if (created.status !== 200) throw upstreamError(created);
-      entry.sessionID = created.json.id;
+      entry.sessionID = created.json?.data?.id;
+      if (!entry.sessionID) throw new Error("opencode did not return a session id");
       entry.turns = 0;
+      entry.modelKey = modelKey;
+    }
+    if (entry.modelKey !== modelKey) {
+      try {
+        await ensureModel(entry.sessionID, modelId, variant);
+        entry.modelKey = modelKey;
+      } catch {
+        // model switch failed (e.g. session went stale) — recreate
+        await deleteSession(entry.sessionID);
+        const created = await ocReq("POST", "/api/session", {
+          model: modelRef(modelId, variant),
+          title: buildTitle(lastUserText),
+        });
+        if (created.status !== 200) throw upstreamError(created);
+        entry.sessionID = created.json?.data?.id;
+        entry.turns = 0;
+        entry.modelKey = modelKey;
+      }
     }
     onSession?.(entry.sessionID);
-    const text = entry.turns === 0 ? (transcript || lastUserText) : lastUserText;
+    const turnText = entry.turns === 0 ? text : (system ? `[System instructions]\n${system}\n\n${lastUserText}` : lastUserText);
     entry.turns++;
-    return ocReq("POST", `/session/${entry.sessionID}/message`, {
-      ...(system ? { system } : {}),
-      model,
-      parts: [{ type: "text", text }],
-    });
+    return promptAndWait(entry.sessionID, turnText, watch);
   });
   entry.chain = run.catch(() => {});
   return run;
 }
 
 // ── translation: opencode message → chat formats ────────────────────
+// v1 shape: { parts: [{type,text}], info: {tokens, finish} }
+// v2 shape: { content: [{type:'text'|'reasoning',text}], tokens, finish, error }
 function extractMessage(message) {
   let text = "";
   let reasoning = "";
-  for (const p of message?.parts || []) {
+  const parts = message?.parts || message?.content || [];
+  for (const p of parts) {
     if (p.type === "text") text += p.text ?? "";
     else if (p.type === "reasoning") reasoning += p.text ?? "";
   }
-  const tokens = message?.info?.tokens || {};
+  const tokens = message?.info?.tokens || message?.tokens || {};
   return {
     text,
     reasoning,
     inputTokens: tokens.input ?? 0,
     outputTokens: tokens.output ?? 0,
-    finish: message?.info?.finish,
+    finish: message?.info?.finish ?? message?.finish,
   };
 }
 
@@ -488,11 +757,28 @@ function anthropicSink(res, modelId) {
 }
 
 // ── live deltas: opencode's SSE /event ─────────────────────────────
-// POST /session/{id}/message blocks until the run finishes, but /event
-// emits `message.part.delta` while it is still generating — tap it to
-// forward real tokens. Deltas carry only a partID, so part types are
-// tracked from `message.part.updated` to tell reasoning from content.
+// ── live deltas: opencode's SSE /api/event ─────────────────────────
+// v1:  { type: "message.part.delta", properties: { sessionID, partID, delta } }
+// v2:  data: {"id","type":"session.*","data":{"sessionID", ...}}
+// v2 prompt is async, so promptAndWait polls for completion; the SSE tap
+// only forwards best-effort streaming deltas and watches for
+// session.execution.failed to fail fast with the real provider error.
 // If no delta ever shows up the sink falls back to the buffered reply.
+function eventSessionID(ev, p) {
+  return p.sessionID || ev.sessionID || ev.data?.sessionID || null;
+}
+function findDeltaText(obj, depth = 0) {
+  if (!obj || depth > 4) return null;
+  if (typeof obj === "string") return null;
+  if (typeof obj.delta === "string" && obj.delta) return obj.delta;
+  for (const v of Object.values(obj)) {
+    if (v && typeof v === "object") {
+      const hit = findDeltaText(v, depth + 1);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
 function connectEvents(watch) {
   let req = null;
   let done = false;
@@ -503,28 +789,56 @@ function connectEvents(watch) {
     try { req?.destroy(); } catch {}
   };
   const onFrame = (frame) => {
+    if (!frame || frame.startsWith(":") || !frame.includes("data:")) return;
     const line = frame.split("\n").find((l) => l.startsWith("data:"));
     if (!line) return;
     let ev;
     try { ev = JSON.parse(line.slice(5)); } catch { return; }
-    const p = ev.properties || {};
-    if (!watch.sid || p.sessionID !== watch.sid) return;
-    if (ev.type === "message.part.updated" && p.part && p.part.id) {
+    const p = ev.properties || ev.data || {};
+    if (watch.sid && eventSessionID(ev, p) && eventSessionID(ev, p) !== watch.sid) return;
+    const type = ev.type || "";
+    // completion / failure signals (v2 + v1)
+    if (type === "session.execution.completed" || type === "session.execution.idle") {
+      watch.done = true;
+      return;
+    }
+    if (type === "session.execution.failed" || type === "session.step.failed") {
+      const errPayload = p.error || ev.error || p.data?.error;
+      watch.error = assistantError(errPayload || { message: "opencode run failed", status: 502 });
+      watch.done = true;
+      return;
+    }
+    // v1 part tracking
+    if (type === "message.part.updated" && p.part && p.part.id) {
       watch.types.set(p.part.id, p.part.type);
-    } else if (ev.type === "message.part.delta" && typeof p.delta === "string" && p.delta) {
+      return;
+    }
+    if ((type === "message.part.delta" || type.endsWith("part.delta")) && typeof p.delta === "string" && p.delta) {
       const kind = watch.types.get(p.partID) === "reasoning" ? "reasoning" : "text";
-      watch.sink.delta(kind, p.delta);
+      watch.sink?.delta(kind, p.delta);
+      return;
+    }
+    // v2 generic: any event carrying a delta string for our session
+    if (/delta|part|message/i.test(type)) {
+      const delta = findDeltaText(p) || findDeltaText(ev);
+      if (delta) {
+        const kind = /reason|think/i.test(JSON.stringify(p).slice(0, 500)) ? "reasoning" : "text";
+        watch.sink?.delta(kind, delta);
+      }
+      // track part types when present
+      const part = p.part || ev.part;
+      if (part?.id) watch.types.set(part.id, part.type);
     }
   };
   try {
-    const u = new URL(ocBase + "/event");
+    const u = new URL(ocBase + "/api/event");
     req = http.request(
       {
         hostname: u.hostname,
         port: u.port,
         path: u.pathname,
         method: "GET",
-        headers: { ...(ocAuth ? { Authorization: ocAuth } : {}) },
+        headers: { ...(ocAuth ? { Authorization: ocAuth } : {}), Accept: "text/event-stream" },
         timeout: REQUEST_TIMEOUT,
       },
       (r) => {
@@ -535,7 +849,7 @@ function connectEvents(watch) {
           while ((i = buf.indexOf("\n\n")) !== -1) {
             const frame = buf.slice(0, i);
             buf = buf.slice(i + 2);
-            onFrame(frame);
+            try { onFrame(frame); } catch {}
           }
         });
         r.on("end", close);
@@ -574,9 +888,14 @@ app.post("/v1/chat/completions", async (req, res) => {
   let watch = null;
   try {
     const { model, messages, stream, user: userId } = req.body || {};
-    const modelId = String(model || "").replace(/^opencode\//, "");
+    const { id: modelId, variant: modelVariant } = parseModel(model);
     const models = await getModels();
     if (!models.includes(modelId)) {
+      if (isBlockedPaid(modelId)) {
+        return res.status(403).json({
+          error: { message: `Model ${modelId} is a paid model — blocked (FREE_ONLY=1). Free models: ${models.join(", ")}`, type: "invalid_request_error" },
+        });
+      }
       return res.status(400).json({
         error: { message: `Unknown model: ${modelId}. Available: ${models.join(", ")}` },
       });
@@ -584,6 +903,7 @@ app.post("/v1/chat/completions", async (req, res) => {
     const { system, transcript, lastUserText } = messagesToPrompt(messages);
     if (!lastUserText) return res.status(400).json({ error: { message: "No user message in request" } });
     const key = req.headers["x-oc-session"] || userId || null;
+    console.log(`[REQ] ${new Date().toISOString()} chat key=${auth(req)} model=${modelId}${modelVariant ? `[${modelVariant}]` : ""} stream=${!!stream} session=${key || "(stateless)"}`);
     if (stream) {
       sink = openaiSink(res, modelId);
       watch = { sid: null, types: new Map(), sink, conn: null };
@@ -591,7 +911,7 @@ app.post("/v1/chat/completions", async (req, res) => {
       res.on("close", () => watch.conn.close());
     }
     const r = await ask({
-      key, system, modelId, transcript, lastUserText,
+      key, system, modelId, modelVariant, transcript, lastUserText, watch,
       onSession: (sid) => { if (watch) watch.sid = sid; },
     });
     if (r.status !== 200) throw upstreamError(r);
@@ -615,9 +935,15 @@ app.post("/v1/messages", async (req, res) => {
   let watch = null;
   try {
     const { model, stream, metadata } = req.body || {};
-    const modelId = String(model || "").replace(/^opencode\//, "");
+    const { id: modelId, variant: modelVariant } = parseModel(model);
     const models = await getModels();
     if (!models.includes(modelId)) {
+      if (isBlockedPaid(modelId)) {
+        return res.status(403).json({
+          type: "error",
+          error: { type: "permission_error", message: `Model ${modelId} is a paid model — blocked (FREE_ONLY=1). Free models: ${models.join(", ")}` },
+        });
+      }
       return res.status(400).json({
         type: "error",
         error: { type: "invalid_request_error", message: `Unknown model: ${modelId}. Available: ${models.join(", ")}` },
@@ -631,6 +957,7 @@ app.post("/v1/messages", async (req, res) => {
       });
     }
     const key = req.headers["x-oc-session"] || metadata?.user_id || null;
+    console.log(`[REQ] ${new Date().toISOString()} messages key=${auth(req)} model=${modelId}${modelVariant ? `[${modelVariant}]` : ""} stream=${!!stream} session=${key || "(stateless)"}`);
     if (stream) {
       sink = anthropicSink(res, modelId);
       watch = { sid: null, types: new Map(), sink, conn: null };
@@ -638,7 +965,7 @@ app.post("/v1/messages", async (req, res) => {
       res.on("close", () => watch.conn.close());
     }
     const r = await ask({
-      key, system, modelId, transcript, lastUserText,
+      key, system, modelId, modelVariant, transcript, lastUserText, watch,
       onSession: (sid) => { if (watch) watch.sid = sid; },
     });
     if (r.status !== 200) throw upstreamError(r);
@@ -672,7 +999,7 @@ app.listen(PROXY_PORT, "0.0.0.0", async () => {
   try {
     await startBackend();
     const models = await getModels();
-    console.log("  Models:", models.join(", "));
+    console.log(`  Models (${FREE_ONLY && !ALLOWED_MODELS.length ? "free only" : ALLOWED_MODELS.length ? "allowlist" : "all"}):`, models.join(", "));
   } catch (e) {
     console.error("  Failed to start opencode backend:", e.message);
     process.exit(1);

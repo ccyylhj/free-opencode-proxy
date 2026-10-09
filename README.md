@@ -75,3 +75,5 @@ curl http://localhost:6447/v1/messages \
 | `OC_USERNAME` / `OC_PASSWORD` | `opencode` / — | basic auth for `OC_SERVER` |
 | `OC_TIMEOUT` | `600` | per-request timeout (seconds) |
 | `KEYS_FILE` | `./api-keys.json` | API keys file |
+| `FREE_ONLY` | `1` | only serve models whose `cost` tiers are all zero (`0` = serve paid models too, you pay) |
+| `ALLOWED_MODELS` | — | comma-separated explicit allowlist, e.g. `muse-spark-1.3-contributor-free,big-pickle` (overrides `FREE_ONLY`) |
