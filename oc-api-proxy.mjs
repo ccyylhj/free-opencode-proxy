@@ -41,9 +41,18 @@ import os from "os";
 import path from "path";
 import http from "http";
 import { spawn } from "child_process";
-import { fileURLToPath } from "url";
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
+// Base dir for api-keys.json / oc-workspace.
+// Dev (node oc-api-proxy.mjs): the script's own directory.
+// Packaged single-exe (SEA: argv has no script): the exe's directory,
+// so keys + workspace travel with the exe (portable).
+const HERE = (() => {
+  const script = process.argv[1];
+  if (!script || path.resolve(script) === path.resolve(process.execPath)) {
+    return path.dirname(process.execPath);
+  }
+  return path.dirname(path.resolve(script));
+})();
 const PROXY_PORT = Number(process.env.PROXY_PORT || 6447);
 const OC_SERVER = process.env.OC_SERVER;
 const OC_USERNAME = process.env.OC_USERNAME || "opencode";

@@ -16,6 +16,20 @@ npm start          # listens on :6447, auto-spawns `opencode serve`
 
 API keys live in `api-keys.json` (auto-generated on first run if missing).
 
+## Run without npm (Windows single exe)
+
+The repo builds to one `oc-api-proxy.exe` (~88MB, Node embedded) — no Node/npm
+needed on the machine that runs it. You still need the `opencode` binary
+installed (the proxy spawns `opencode serve` for the actual upstream calls).
+
+```bat
+build-win.bat        :: produces dist\oc-api-proxy.exe (needs Node+npm on the BUILD machine only)
+```
+
+Copy `dist\oc-api-proxy.exe` anywhere and double-click it (first launch prints
+a SmartScreen warning — unsigned binary, click "run anyway"). `api-keys.json`
+and `oc-workspace/` are created next to the exe on first run (portable).
+
 ## Endpoints
 
 | Method | Path | Format |
