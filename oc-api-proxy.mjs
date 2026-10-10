@@ -933,6 +933,7 @@ app.post("/v1/chat/completions", async (req, res) => {
     if (stream) return sink.finish(extracted);
     return res.json(openaiResponse(modelId, extracted));
   } catch (e) {
+    console.error(`[ERR] ${new Date().toISOString()} chat model=${modelId} session=${key || "(stateless)"} status=${e.status || 502}: ${e.message}`);
     if (sink && sink.opened) return sink.fail(e.message);
     return res.status(e.status || 502).json({ error: { message: e.message, type: "upstream_error" } });
   } finally {
@@ -987,6 +988,7 @@ app.post("/v1/messages", async (req, res) => {
     if (stream) return sink.finish(extracted);
     return res.json(anthropicResponse(modelId, extracted));
   } catch (e) {
+    console.error(`[ERR] ${new Date().toISOString()} messages model=${modelId} session=${key || "(stateless)"} status=${e.status || 502}: ${e.message}`);
     if (sink && sink.opened) return sink.fail(e.message);
     return res.status(e.status || 502).json({
       type: "error",
