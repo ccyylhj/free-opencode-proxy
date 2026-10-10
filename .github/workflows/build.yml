@@ -14,15 +14,12 @@ jobs:
         include:
           - runner: windows-latest
             artifact: oc-api-proxy-win-x64.exe
-            build: build-win.bat
             exe: dist/oc-api-proxy.exe
           - runner: macos-14
             artifact: oc-api-proxy-macos-arm64
-            build: ./build-mac.sh
             exe: dist/oc-api-proxy
           - runner: macos-15-intel
             artifact: oc-api-proxy-macos-x64
-            build: ./build-mac.sh
             exe: dist/oc-api-proxy
     runs-on: ${{ matrix.runner }}
     steps:
@@ -32,9 +29,15 @@ jobs:
         with:
           node-version: 24.x
 
-      - name: bundle + SEA build
-        run: ${{ matrix.build }}
-        shell: ${{ runner.os == 'Windows' && 'cmd' || 'bash' }}
+      - name: bundle + SEA build (Windows)
+        if: runner.os == 'Windows'
+        run: build-win.bat
+        shell: cmd
+
+      - name: bundle + SEA build (macOS)
+        if: runner.os == 'macOS'
+        run: ./build-mac.sh
+        shell: bash
 
       - name: ad-hoc sign (macOS only)
         if: runner.os == 'macOS'
