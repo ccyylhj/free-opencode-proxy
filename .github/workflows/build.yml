@@ -15,14 +15,9 @@ jobs:
           - runner: windows-latest
             artifact: oc-api-proxy-win-x64.exe
             exe: dist/oc-api-proxy.exe
-          - runner: macos-14
-            artifact: oc-api-proxy-macos-arm64
+          - runner: ubuntu-22.04
+            artifact: oc-api-proxy-linux-x64
             exe: dist/oc-api-proxy
-            pkgTarget: node20-macos-arm64
-          - runner: macos-15-intel
-            artifact: oc-api-proxy-macos-x64
-            exe: dist/oc-api-proxy
-            pkgTarget: node20-macos-x64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -39,24 +34,10 @@ jobs:
         run: build-win.bat
         shell: cmd
 
-      - name: pkg build (macOS, postject breaks newer Node Mach-O binaries)
-        if: runner.os == 'macOS'
-        run: npx -y @yao-pkg/pkg . --targets $PKG_TARGET --output dist/oc-api-proxy
+      - name: bundle + SEA build (Linux)
+        if: runner.os == 'Linux'
+        run: ./build-linux.sh
         shell: bash
-        env:
-          PKG_TARGET: ${{ matrix.pkgTarget }}
-
-      - name: ad-hoc sign (macOS only)
-        if: runner.os == 'macOS'
-        run: codesign --sign - --force dist/oc-api-proxy
-
-      - name: diagnose binary (macOS only)
-        if: runner.os == 'macOS'
-        continue-on-error: true
-        run: |
-          file dist/oc-api-proxy
-          codesign -dv dist/oc-api-proxy || true
-          spctl -a -vv dist/oc-api-proxy || true
 
       - name: install opencode CLI (best effort, for a stronger smoke test)
         run: npm install -g @opencode/cli
@@ -73,8 +54,8 @@ jobs:
         run: copy dist\oc-api-proxy.exe ${{ matrix.artifact }}
         shell: cmd
 
-      - name: stage artifact (macOS)
-        if: runner.os == 'macOS'
+      - name: stage artifact (Linux)
+        if: runner.os == 'Linux'
         run: |
           cp dist/oc-api-proxy ${{ matrix.artifact }}
           chmod +x ${{ matrix.artifact }}

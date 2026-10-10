@@ -3,8 +3,8 @@
 OpenCode's **free** models exposed as standard **OpenAI** and **Anthropic** APIs.
 
 > 不想折腾：直接去 [Releases](../../releases) 下载对应平台的单文件版
-> （`oc-api-proxy-win-x64.exe` / `oc-api-proxy-macos-arm64` /
-> `oc-api-proxy-macos-x64`），每个 `v*` tag 自动构建发布。
+> （`oc-api-proxy-win-x64.exe` / `oc-api-proxy-linux-x64`），每个 `v*` tag
+> 自动构建发布。
 
 Since ~2026-09-17 OpenCode's free tier rejects every client except the genuine
 `opencode` binary (TLS-fingerprint gate — spoofing headers no longer works).
@@ -34,35 +34,22 @@ Copy `dist\oc-api-proxy.exe` anywhere and double-click it (first launch prints
 a SmartScreen warning — unsigned binary, click "run anyway"). `api-keys.json`
 and `oc-workspace/` are created next to the exe on first run (portable).
 
-## Run without npm (macOS binaries)
+## Run without npm (Linux binary)
 
-GitHub Actions builds both Mac binaries on every `v*` tag
-(`.github/workflows/build.yml`, native runners — no cross-compile hacks):
-
-| File | Runner |
-|------|--------|
-| `oc-api-proxy-macos-arm64` | `macos-14` (Apple Silicon) |
-| `oc-api-proxy-macos-x64` | `macos-15-intel` |
-
-Or build locally: `./build-mac.sh` → `dist/oc-api-proxy`. (CI uses
-`@yao-pkg/pkg` for macOS instead — `postject` produces segfaulting Mach-O
-binaries on newer Node, so SEA is Windows-only here.)
-
-First run on a Mac:
+GitHub Actions builds `oc-api-proxy-linux-x64` on every `v*` tag
+(`.github/workflows/build.yml`, `ubuntu-22.04` runner — glibc baseline stays
+low so Debian 11+ / Ubuntu 20.04+ all run it). Or build locally:
+`./build-linux.sh` → `dist/oc-api-proxy`.
 
 ```bash
-chmod +x oc-api-proxy-macos-arm64
-./oc-api-proxy-macos-arm64
+chmod +x oc-api-proxy-linux-x64
+./oc-api-proxy-linux-x64
 ```
 
-Gatekeeper will block it (ad-hoc signature only, see below) — right-click →
-Open, or `xattr -cr oc-api-proxy-macos-arm64`. `api-keys.json` is created next
-to the binary. You still need `opencode` installed (`~/.opencode/bin/opencode`
-is picked up automatically).
-
-Signing note: CI applies an ad-hoc signature (`codesign -s -`) so the binary
-isn't completely unsigned, but without a paid Apple Developer ID there is no
-notarization — the first-launch bypass above is expected.
+`api-keys.json` and `oc-workspace/` are created next to the binary on first
+run (portable). You still need `opencode` installed
+(`curl -fsSL https://opencode.ai/install | bash`, then `opencode auth login`),
+plus ~300MB free RAM (proxy ~50MB + `opencode serve` ~250MB).
 
 ## Endpoints
 
