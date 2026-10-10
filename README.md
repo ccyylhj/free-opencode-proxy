@@ -30,6 +30,34 @@ Copy `dist\oc-api-proxy.exe` anywhere and double-click it (first launch prints
 a SmartScreen warning — unsigned binary, click "run anyway"). `api-keys.json`
 and `oc-workspace/` are created next to the exe on first run (portable).
 
+## Run without npm (macOS binaries)
+
+GitHub Actions builds both Mac binaries on every `v*` tag
+(`.github/workflows/build.yml`, native runners — no cross-compile hacks):
+
+| File | Runner |
+|------|--------|
+| `oc-api-proxy-macos-arm64` | `macos-14` (Apple Silicon) |
+| `oc-api-proxy-macos-x64` | `macos-15-intel` |
+
+Or build locally: `./build-mac.sh` → `dist/oc-api-proxy`.
+
+First run on a Mac:
+
+```bash
+chmod +x oc-api-proxy-macos-arm64
+./oc-api-proxy-macos-arm64
+```
+
+Gatekeeper will block it (ad-hoc signature only, see below) — right-click →
+Open, or `xattr -cr oc-api-proxy-macos-arm64`. `api-keys.json` is created next
+to the binary. You still need `opencode` installed (`~/.opencode/bin/opencode`
+is picked up automatically).
+
+Signing note: CI applies an ad-hoc signature (`codesign -s -`) so the binary
+isn't completely unsigned, but without a paid Apple Developer ID there is no
+notarization — the first-launch bypass above is expected.
+
 ## Endpoints
 
 | Method | Path | Format |
