@@ -29,6 +29,9 @@ jobs:
         with:
           node-version: 24.x
 
+      - name: install deps (needed for esbuild bundling)
+        run: npm ci
+
       - name: bundle + SEA build (Windows)
         if: runner.os == 'Windows'
         run: build-win.bat
