@@ -44,7 +44,9 @@ GitHub Actions builds both Mac binaries on every `v*` tag
 | `oc-api-proxy-macos-arm64` | `macos-14` (Apple Silicon) |
 | `oc-api-proxy-macos-x64` | `macos-15-intel` |
 
-Or build locally: `./build-mac.sh` → `dist/oc-api-proxy`.
+Or build locally: `./build-mac.sh` → `dist/oc-api-proxy`. (CI uses
+`@yao-pkg/pkg` for macOS instead — `postject` produces segfaulting Mach-O
+binaries on newer Node, so SEA is Windows-only here.)
 
 First run on a Mac:
 

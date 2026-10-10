@@ -18,9 +18,11 @@ jobs:
           - runner: macos-14
             artifact: oc-api-proxy-macos-arm64
             exe: dist/oc-api-proxy
+            pkgTarget: node20-macos-arm64
           - runner: macos-15-intel
             artifact: oc-api-proxy-macos-x64
             exe: dist/oc-api-proxy
+            pkgTarget: node20-macos-x64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -37,10 +39,12 @@ jobs:
         run: build-win.bat
         shell: cmd
 
-      - name: bundle + SEA build (macOS)
+      - name: pkg build (macOS, postject breaks newer Node Mach-O binaries)
         if: runner.os == 'macOS'
-        run: ./build-mac.sh
+        run: npx -y @yao-pkg/pkg . --targets $PKG_TARGET --output dist/oc-api-proxy
         shell: bash
+        env:
+          PKG_TARGET: ${{ matrix.pkgTarget }}
 
       - name: ad-hoc sign (macOS only)
         if: runner.os == 'macOS'

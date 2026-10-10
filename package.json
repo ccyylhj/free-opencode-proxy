@@ -4,6 +4,7 @@
   "description": "OpenCode free models as OpenAI/Anthropic APIs, via the genuine opencode binary",
   "type": "module",
   "main": "oc-api-proxy.mjs",
+  "bin": "oc-api-proxy.mjs",
   "scripts": {
     "start": "node oc-api-proxy.mjs"
   },
