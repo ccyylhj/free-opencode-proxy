@@ -2,6 +2,10 @@
 
 OpenCode's **free** models exposed as standard **OpenAI** and **Anthropic** APIs.
 
+> 不想折腾：直接去 [Releases](../../releases) 下载对应平台的单文件版
+> （`oc-api-proxy-win-x64.exe` / `oc-api-proxy-macos-arm64` /
+> `oc-api-proxy-macos-x64`），每个 `v*` tag 自动构建发布。
+
 Since ~2026-09-17 OpenCode's free tier rejects every client except the genuine
 `opencode` binary (TLS-fingerprint gate — spoofing headers no longer works).
 This proxy drives the real binary's local `opencode serve` API, so all upstream
