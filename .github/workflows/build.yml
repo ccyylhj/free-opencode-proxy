@@ -46,6 +46,14 @@ jobs:
         if: runner.os == 'macOS'
         run: codesign --sign - --force dist/oc-api-proxy
 
+      - name: diagnose binary (macOS only)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          file dist/oc-api-proxy
+          codesign -dv dist/oc-api-proxy || true
+          spctl -a -vv dist/oc-api-proxy || true
+
       - name: install opencode CLI (best effort, for a stronger smoke test)
         run: npm install -g @opencode/cli
         continue-on-error: true

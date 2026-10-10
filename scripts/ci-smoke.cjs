@@ -29,11 +29,14 @@ const timer = setTimeout(() => finish(1, "SMOKE FAIL: timeout\n" + out.slice(-80
 
 p.stdout.on("data", (d) => { out += d.toString(); check(); });
 p.stderr.on("data", (d) => { out += d.toString(); });
-p.on("exit", (code) => {
+p.on("error", (e) => {
+  if (!finished) finish(1, "SPAWN ERROR: " + e.message);
+});
+p.on("exit", (code, signal) => {
   if (!finished) {
     finish(
       out.includes("Failed to start opencode backend:") ? 0 : 1,
-      `exited(${code}) tail:\n` + out.slice(-800)
+      `exited(code=${code} signal=${signal}) tail:\n` + out.slice(-800)
     );
   }
 });
