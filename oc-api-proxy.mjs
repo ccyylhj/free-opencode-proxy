@@ -447,21 +447,23 @@ async function ensureModel(sid, modelId, modelVariant) {
 // Poll message list until the assistant turn completes (or execution fails
 // via SSE — watch.error — or a failed assistant message).
 async function promptAndWait(sid, text, watch) {
+  // Snapshot pre-existing messages first: on a pinned (stateful) session an
+  // early poll can otherwise see the PREVIOUS turn's completed assistant and
+  // return it as this turn's reply (same answer repeated every turn).
+  const known = new Set();
+  try {
+    const before = await ocReq("GET", `/api/session/${sid}/message?order=asc&limit=100`);
+    for (const d of (before.json?.data || [])) if (d?.id) known.add(d.id);
+  } catch {}
   const posted = await ocReq("POST", `/api/session/${sid}/prompt`, { text });
   if (posted.status !== 200) throw upstreamError(posted);
   const deadline = Date.now() + REQUEST_TIMEOUT;
-  let lastSeen = 0;
   while (Date.now() < deadline) {
     if (watch?.error) throw watch.error;
     const m = await ocReq("GET", `/api/session/${sid}/message?order=asc&limit=100`);
     if (m.status !== 200) throw upstreamError(m);
     const datas = Array.isArray(m.json?.data) ? m.json.data : [];
-    // stream progress into the SSE sink best-effort (poll-based fallback
-    // for shapes the /api/event tap doesn't recognise)
-    if (watch?.sink && !watch.sink.opened && datas.length !== lastSeen) {
-      lastSeen = datas.length;
-    }
-    const assistants = datas.filter((d) => d?.type === "assistant");
+    const assistants = datas.filter((d) => d?.type === "assistant" && d?.id && !known.has(d.id));
     const lastA = assistants[assistants.length - 1];
     if (lastA) {
       if (lastA.error) throw assistantError(lastA.error);
